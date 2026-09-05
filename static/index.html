@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clean-Channel Recommender</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --fg: #1a1d21; --muted: #6b7280;
+    --border: #e3e6ea; --accent: #2563eb; --ok: #16a34a; --bad: #dc2626;
+    --row: #f9fafb; --code: #f1f3f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1116; --card: #171b21; --fg: #e6e8eb; --muted: #9aa4b2;
+      --border: #2a2f37; --accent: #4f8cff; --ok: #35c46a; --bad: #ff6b6b;
+      --row: #1c2129; --code: #10141a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 24px 16px 60px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px; margin-bottom: 18px;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  select, input {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--bg); color: var(--fg); font-size: 14px;
+  }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  button {
+    margin-top: 16px; padding: 10px 18px; border: 0; border-radius: 8px;
+    background: var(--accent); color: #fff; font-size: 14px; font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .6; cursor: default; }
+  .stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .badge {
+    font-size: 12px; padding: 4px 10px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--row);
+  }
+  .badge b { color: var(--fg); }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  tr:nth-child(even) td { background: var(--row); }
+  td.num { font-variant-numeric: tabular-nums; }
+  .tech { font-weight: 600; }
+  .err { color: var(--bad); }
+  .overflow { overflow-x: auto; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Clean-Channel Recommender</h1>
+  <p class="sub">Config-driven 2G/3G/4G/5G selection — polars filter + OR-Tools CP-SAT.</p>
+
+  <div class="card">
+    <div class="grid">
+      <div>
+        <label for="scenario">Scenario</label>
+        <select id="scenario"></select>
+        <div class="hint" id="scnMode"></div>
+      </div>
+      <div>
+        <label for="k">k <span style="opacity:.6">(top_k only)</span></label>
+        <input id="k" type="number" min="1" placeholder="config">
+        <div class="hint">how many to return</div>
+      </div>
+      <div>
+        <label for="max_channels">max_channels <span style="opacity:.6">(set)</span></label>
+        <input id="max_channels" type="number" min="1" placeholder="config">
+        <div class="hint">transceiver limit</div>
+      </div>
+      <div>
+        <label for="power_budget">power_budget <span style="opacity:.6">(set)</span></label>
+        <input id="power_budget" type="number" min="1" placeholder="config">
+        <div class="hint">sum of tx power</div>
+      </div>
+      <div>
+        <label for="min_separation_khz">min_separation_khz <span style="opacity:.6">(set)</span></label>
+        <input id="min_separation_khz" type="number" min="0" placeholder="config">
+        <div class="hint">guard band</div>
+      </div>
+    </div>
+    <button id="run">Recommend</button>
+  </div>
+
+  <div class="card" id="out" hidden>
+    <div class="stats" id="stats"></div>
+    <div class="overflow"><table id="tbl"></table></div>
+  </div>
+
+  <div class="card err" id="errbox" hidden></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let scenarios = {};
+
+async function loadScenarios() {
+  try {
+    const r = await fetch("/scenarios");
+    scenarios = await r.json();
+    const sel = $("scenario");
+    sel.innerHTML = "";
+    for (const name of Object.keys(scenarios)) {
+      const o = document.createElement("option");
+      o.value = name; o.textContent = name;
+      sel.appendChild(o);
+    }
+    updateMode();
+  } catch (e) { showErr("Cannot reach API /scenarios: " + e); }
+}
+
+function updateMode() {
+  const s = scenarios[$("scenario").value];
+  $("scnMode").textContent = s ? `mode: ${s.mode} — techs: ${s.allowed_techs.join(", ")}` : "";
+}
+
+function showErr(msg) {
+  $("errbox").hidden = false; $("errbox").textContent = msg;
+  $("out").hidden = true;
+}
+
+function num(v) { return typeof v === "number" ? v.toFixed(3) : v; }
+
+async function run() {
+  $("errbox").hidden = true;
+  const btn = $("run"); btn.disabled = true; btn.textContent = "Solving...";
+  const body = { scenario: $("scenario").value };
+  for (const f of ["k", "max_channels", "power_budget", "min_separation_khz"]) {
+    if ($(f).value !== "") body[f] = parseInt($(f).value, 10);
+  }
+  try {
+    const r = await fetch("/recommend", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!r.ok) { showErr(d.detail || JSON.stringify(d)); return; }
+    render(d);
+  } catch (e) { showErr("Request failed: " + e); }
+  finally { btn.disabled = false; btn.textContent = "Recommend"; }
+}
+
+function render(d) {
+  $("out").hidden = false;
+  const under = d.total_ms < 1000;
+  $("stats").innerHTML = `
+    <span class="badge">mode <b>${d.mode}</b></span>
+    <span class="badge">after filter <b>${d.candidates_after_filter.toLocaleString()}</b></span>
+    <span class="badge">filter+score <b>${d.filter_score_ms.toFixed(1)} ms</b></span>
+    ${d.mode === "set" ? `<span class="badge">CP-SAT <b>${d.solve_ms.toFixed(1)} ms</b></span>` : ""}
+    <span class="badge">total <b class="${under ? "ok" : "bad"}">${d.total_ms.toFixed(1)} ms</b> ${under ? "&lt;1s ✓" : "OVER 1s"}</span>
+    <span class="badge">returned <b>${d.returned}</b></span>`;
+  const cols = ["tech", "band", "freq_khz", "cleanliness", "capture_prob", "power_required", "score"];
+  let h = "<tr>" + cols.map(c => `<th>${c}</th>`).join("") + "</tr>";
+  for (const row of d.result) {
+    h += "<tr>" + cols.map(c => {
+      if (c === "tech") return `<td class="tech">${row[c]}</td>`;
+      if (c === "band") return `<td>${row[c]}</td>`;
+      return `<td class="num">${num(row[c])}</td>`;
+    }).join("") + "</tr>";
+  }
+  $("tbl").innerHTML = h;
+}
+
+$("scenario").addEventListener("change", updateMode);
+$("run").addEventListener("click", run);
+loadScenarios();
+</script>
+</body>
+</html>

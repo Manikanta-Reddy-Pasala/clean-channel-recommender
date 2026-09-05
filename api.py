@@ -23,9 +23,14 @@ import os
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import engine
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_STATIC = os.path.join(_HERE, "static")
 
 CFG = engine.load_config(os.environ.get("CHANNEL_CONFIG", "config.yaml"))
 _data_path = os.environ.get("CHANNEL_DATA")
@@ -37,6 +42,12 @@ else:
     _source = f"synthetic:{DF.height}"
 
 app = FastAPI(title="Clean-Channel Recommender", version="0.1")
+app.mount("/static", StaticFiles(directory=_STATIC), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def ui():
+    return FileResponse(os.path.join(_STATIC, "index.html"))
 
 
 class Req(BaseModel):

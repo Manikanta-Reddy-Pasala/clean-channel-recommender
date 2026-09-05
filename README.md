@@ -32,8 +32,11 @@ Prune millions first, solve on hundreds. That is why it stays under 1s.
 make install                 # venv + deps
 make run                     # all scenarios, 1M rows
 make bench                   # 5M stress
-make api                     # REST API on :8000
+make api                     # REST API + web UI on :8000
 ```
+
+**Web UI:** run `make api`, open <http://localhost:8000/> — pick a scenario, tweak
+overrides, see the recommended channels and timings. (Single static file, no build.)
 
 CLI: `python engine.py [--rows N] [--scenario NAME] [--data file.parquet] [--json] [--list-scenarios] [--gen file.parquet]`
 
@@ -58,7 +61,7 @@ urban_multi_capture:
 
 ## Files
 
-`engine.py` (filter+score+CP-SAT+CLI) · `api.py` (FastAPI) · `config.yaml` (all logic) · `Makefile` · `requirements.txt`
+`engine.py` (filter+score+CP-SAT+CLI) · `api.py` (FastAPI + UI) · `static/index.html` (web UI) · `config.yaml` (all logic) · `Makefile` · `requirements.txt`
 
 ## Note
 
