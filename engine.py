@@ -17,11 +17,25 @@ Run:
   python engine.py --scenario urban_multi_capture
 """
 import argparse
+import json
 import time
 import yaml
 import numpy as np
 import polars as pl
 from ortools.sat.python import cp_model
+
+
+def load_config(path: str = "config.yaml") -> dict:
+    return yaml.safe_load(open(path))
+
+
+def load_candidates(path: str) -> pl.DataFrame:
+    """Load a pre-scanned candidate table (.parquet or .csv) for production use."""
+    if path.endswith(".parquet"):
+        return pl.read_parquet(path)
+    if path.endswith(".csv"):
+        return pl.read_csv(path)
+    raise ValueError(f"unsupported data file (want .parquet/.csv): {path}")
 
 
 # --------------------------------------------------------------------------- #
@@ -191,22 +205,64 @@ def recommend(df: pl.DataFrame, cfg: dict, scenario: str) -> dict:
     }
 
 
+def result_to_records(r: dict) -> dict:
+    """JSON-serializable view of a recommend() result."""
+    out = {k: v for k, v in r.items() if k != "result"}
+    out["result"] = r["result"].to_dicts()
+    return out
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rows", type=int, default=1_000_000)
+    ap = argparse.ArgumentParser(
+        description="Config-driven clean-channel recommender POC")
+    ap.add_argument("--rows", type=int, default=1_000_000,
+                    help="synthetic candidate rows (ignored if --data given)")
     ap.add_argument("--config", default="config.yaml")
-    ap.add_argument("--scenario", default=None)
+    ap.add_argument("--scenario", default=None,
+                    help="run one scenario (default: all)")
+    ap.add_argument("--data", default=None,
+                    help="load pre-scanned candidates from .parquet/.csv")
+    ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--json", action="store_true",
+                    help="emit JSON instead of tables")
+    ap.add_argument("--list-scenarios", action="store_true",
+                    help="print scenario names and exit")
+    ap.add_argument("--gen", metavar="PATH",
+                    help="write synthetic candidates to a .parquet/.csv and exit")
     args = ap.parse_args()
 
-    cfg = yaml.safe_load(open(args.config))
+    cfg = load_config(args.config)
 
-    t = time.perf_counter()
-    df = generate_candidates(cfg, args.rows)
-    gen_ms = (time.perf_counter() - t) * 1000
-    print(f"# generated {df.height:,} candidate channels in {gen_ms:.0f} ms "
-          f"(one-time; production loads pre-scanned data)\n")
+    if args.list_scenarios:
+        for name, scn in cfg["scenarios"].items():
+            print(f"{name:24s} mode={scn['select']['mode']:6s} "
+                  f"techs={scn['allowed_techs']}")
+        return
+
+    if args.data:
+        df = load_candidates(args.data)
+        if not args.json:
+            print(f"# loaded {df.height:,} candidates from {args.data}\n")
+    else:
+        t = time.perf_counter()
+        df = generate_candidates(cfg, args.rows, seed=args.seed)
+        gen_ms = (time.perf_counter() - t) * 1000
+        if args.gen:
+            (df.write_parquet(args.gen) if args.gen.endswith(".parquet")
+             else df.write_csv(args.gen))
+            print(f"# wrote {df.height:,} candidates -> {args.gen}")
+            return
+        if not args.json:
+            print(f"# generated {df.height:,} candidate channels in {gen_ms:.0f} ms "
+                  f"(one-time; production loads pre-scanned data)\n")
 
     scenarios = [args.scenario] if args.scenario else list(cfg["scenarios"])
+
+    if args.json:
+        print(json.dumps([result_to_records(recommend(df, cfg, s))
+                          for s in scenarios], indent=2))
+        return
+
     for s in scenarios:
         r = recommend(df, cfg, s)
         print(f"=== scenario: {r['scenario']}  (mode={r['mode']}) ===")

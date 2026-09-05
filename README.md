@@ -37,14 +37,75 @@ All well under the 1s target.
 
 ## Run
 
+Setup once:
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-
-python engine.py                          # all scenarios, 1M synthetic rows
-python engine.py --rows 5000000           # stress
-python engine.py --scenario urban_multi_capture
+# or: make install
 ```
+
+### 1. CLI
+
+```bash
+python engine.py                              # all scenarios, 1M synthetic rows
+python engine.py --rows 5000000               # stress
+python engine.py --scenario urban_multi_capture
+python engine.py --list-scenarios             # names + modes
+python engine.py --scenario urban_best_single --json   # machine-readable
+python engine.py --gen candidates.parquet     # write synthetic data file
+python engine.py --data candidates.parquet --scenario rural_wide_capture
+```
+
+| Flag | Purpose |
+|------|---------|
+| `--rows N` | synthetic candidate count (default 1M) |
+| `--scenario NAME` | run one scenario (default: all) |
+| `--data PATH` | load pre-scanned `.parquet`/`.csv` instead of synthetic |
+| `--gen PATH` | write synthetic candidates to a file and exit |
+| `--json` | emit JSON instead of tables |
+| `--list-scenarios` | print scenario names and exit |
+| `--seed N` | rng seed |
+
+### 2. Makefile shortcuts
+
+```bash
+make install    # venv + deps
+make run        # all scenarios, 1M rows
+make bench      # 5M-row stress
+make json       # JSON output
+make list       # list scenarios
+make gen        # write candidates.parquet
+make api        # serve REST API on :8000
+```
+
+### 3. REST API
+
+Data is loaded once at startup and held in memory; each request is just the
+sub-second filter+solve path.
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000        # or: make api
+# point at real data + size via env:
+CHANNEL_DATA=candidates.parquet uvicorn api:app --port 8000
+```
+
+Endpoints:
+```bash
+curl localhost:8000/health
+curl localhost:8000/scenarios
+
+# recommend a non-interfering set
+curl -X POST localhost:8000/recommend -H 'Content-Type: application/json' \
+  -d '{"scenario":"urban_multi_capture","max_channels":3}'
+
+# best single, override k
+curl -X POST localhost:8000/recommend -H 'Content-Type: application/json' \
+  -d '{"scenario":"urban_best_single","k":3}'
+```
+
+Per-request overrides (optional): `k`, `max_channels`, `power_budget`,
+`min_separation_khz` — config stays the default.
+Interactive docs at `http://localhost:8000/docs`.
 
 ## Config-driven — add a scenario without touching code
 
@@ -68,8 +129,10 @@ Engine reads: whitelist → filter, weights → score, select → constraints.
 
 | File | Purpose |
 |------|---------|
-| `engine.py` | filter+score (polars) → CP-SAT set selection → benchmark |
+| `engine.py` | filter+score (polars) → CP-SAT set selection → benchmark + CLI |
+| `api.py` | FastAPI REST endpoint (data held in memory) |
 | `config.yaml` | all scenario/band/rule logic |
+| `Makefile` | run/bench/api/gen shortcuts |
 | `requirements.txt` | deps |
 
 ## Notes
