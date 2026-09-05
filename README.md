@@ -1,113 +1,51 @@
 # Clean-Channel Recommender (POC)
 
-Config-driven recommendation engine for clean-channel selection across
-2G / 3G / 4G / 5G bands. No AI — deterministic filter + rank + constraint solve.
+Config-driven clean-channel selection across 2G/3G/4G/5G bands. No AI —
+deterministic **filter → rank → constraint-solve**. Sub-second over ~1M
+candidate channels. Every scenario/rule lives in `config.yaml`; the engine has
+zero per-scenario code.
 
-**Goal:** sub-second recommendation over ~1M candidate channels, with every
-scenario/rule living in `config.yaml` (zero code changes per scenario).
-
-## Why this design
-
-Two different problems hide in "recommend a channel":
-
-1. **Best single channel** → filter + score + sort. Pure ranking. No solver.
-2. **A SET of N non-interfering channels** (guard bands, power budget, limited
-   transceivers) → real combinatorics → [OR-Tools CP-SAT](https://developers.google.com/optimization/cp/cp_solver).
-
-The mistake that makes naive versions slow (~4s) is feeding all million rows
-into loops or into the solver. **Prune first, solve last:**
+## Idea
 
 ```
-1M rows ── polars filter + score (from config) ──► top ~400 ──► CP-SAT picks best SET
-           (~30 ms, NOT the solver)                            (~90 ms)
+1M rows ── polars filter + score (from config) ──► top ~400 ──► OR-Tools CP-SAT
+           (~30 ms, NOT the solver)                            picks best SET (~90 ms)
 ```
 
-CP-SAT earns its place only on the small hard combinatorial core.
+- **Best single channel** → filter + sort. No solver.
+- **A SET of non-interfering channels** (guard band + power budget + transceiver
+  count) → real combinatorics → [OR-Tools CP-SAT](https://developers.google.com/optimization/cp/cp_solver).
 
-## Benchmarks (8-core box)
+Prune millions first, solve on hundreds. That is why it stays under 1s.
 
-| Rows | Scenario | After filter | Filter+score | CP-SAT | Total |
-|------|----------|--------------|--------------|--------|-------|
-| 1M | best single (rank only) | 276k | 29 ms | — | **29 ms** |
-| 1M | multi-channel set | 497k | 41 ms | 95 ms | **135 ms** |
-| 1M | rural set | 296k | 24 ms | 71 ms | **94 ms** |
-| 5M | multi-channel set | 2.5M | 240 ms | 99 ms | **339 ms** |
+## Benchmarks (8-core)
 
-All well under the 1s target.
+| Rows | Scenario | Total |
+|------|----------|-------|
+| 1M | best single | 26 ms |
+| 1M | multi-channel set | 135 ms |
+| 5M | multi-channel set | 350 ms |
 
 ## Run
 
-Setup once:
 ```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
-# or: make install
+make install                 # venv + deps
+make run                     # all scenarios, 1M rows
+make bench                   # 5M stress
+make api                     # REST API on :8000
 ```
 
-### 1. CLI
+CLI: `python engine.py [--rows N] [--scenario NAME] [--data file.parquet] [--json] [--list-scenarios] [--gen file.parquet]`
 
+REST:
 ```bash
-python engine.py                              # all scenarios, 1M synthetic rows
-python engine.py --rows 5000000               # stress
-python engine.py --scenario urban_multi_capture
-python engine.py --list-scenarios             # names + modes
-python engine.py --scenario urban_best_single --json   # machine-readable
-python engine.py --gen candidates.parquet     # write synthetic data file
-python engine.py --data candidates.parquet --scenario rural_wide_capture
-```
-
-| Flag | Purpose |
-|------|---------|
-| `--rows N` | synthetic candidate count (default 1M) |
-| `--scenario NAME` | run one scenario (default: all) |
-| `--data PATH` | load pre-scanned `.parquet`/`.csv` instead of synthetic |
-| `--gen PATH` | write synthetic candidates to a file and exit |
-| `--json` | emit JSON instead of tables |
-| `--list-scenarios` | print scenario names and exit |
-| `--seed N` | rng seed |
-
-### 2. Makefile shortcuts
-
-```bash
-make install    # venv + deps
-make run        # all scenarios, 1M rows
-make bench      # 5M-row stress
-make json       # JSON output
-make list       # list scenarios
-make gen        # write candidates.parquet
-make api        # serve REST API on :8000
-```
-
-### 3. REST API
-
-Data is loaded once at startup and held in memory; each request is just the
-sub-second filter+solve path.
-
-```bash
-uvicorn api:app --host 0.0.0.0 --port 8000        # or: make api
-# point at real data + size via env:
-CHANNEL_DATA=candidates.parquet uvicorn api:app --port 8000
-```
-
-Endpoints:
-```bash
-curl localhost:8000/health
 curl localhost:8000/scenarios
-
-# recommend a non-interfering set
 curl -X POST localhost:8000/recommend -H 'Content-Type: application/json' \
   -d '{"scenario":"urban_multi_capture","max_channels":3}'
-
-# best single, override k
-curl -X POST localhost:8000/recommend -H 'Content-Type: application/json' \
-  -d '{"scenario":"urban_best_single","k":3}'
 ```
+Overrides: `k`, `max_channels`, `power_budget`, `min_separation_khz`. Docs at `/docs`.
 
-Per-request overrides (optional): `k`, `max_channels`, `power_budget`,
-`min_separation_khz` — config stays the default.
-Interactive docs at `http://localhost:8000/docs`.
-
-## Config-driven — add a scenario without touching code
+## Add a scenario (no code)
 
 ```yaml
 urban_multi_capture:
@@ -115,30 +53,16 @@ urban_multi_capture:
   allowed_bands: [B1, B3, B40, n78, n1]
   hard_filters: { max_commercial_rssi: -50, min_capture_prob: 0.20 }
   weights: { cleanliness: 0.50, capture_prob: 0.40, power_cost: -0.10 }
-  select:
-    mode: set                 # or top_k
-    max_channels: 4           # transceiver limit
-    min_separation_khz: 15000 # guard band
-    power_budget: 220
-    prune_to: 400             # candidates fed to solver
+  select: { mode: set, max_channels: 4, min_separation_khz: 15000, power_budget: 220, prune_to: 400 }
 ```
-
-Engine reads: whitelist → filter, weights → score, select → constraints.
 
 ## Files
 
-| File | Purpose |
-|------|---------|
-| `engine.py` | filter+score (polars) → CP-SAT set selection → benchmark + CLI |
-| `api.py` | FastAPI REST endpoint (data held in memory) |
-| `config.yaml` | all scenario/band/rule logic |
-| `Makefile` | run/bench/api/gen shortcuts |
-| `requirements.txt` | deps |
+`engine.py` (filter+score+CP-SAT+CLI) · `api.py` (FastAPI) · `config.yaml` (all logic) · `Makefile` · `requirements.txt`
 
-## Notes
+## Note
 
-- Candidate data here is **synthetic** (`generate_candidates`). Production loads
-  a pre-scanned table (Mongo/Parquet), kept in memory and refreshed on scan —
-  the generation time is not part of a request.
-- Feature model (`cleanliness`, `capture_prob`, `power_required`) is placeholder;
-  wire real RSSI / capture-probability / regulatory band tables for production.
+Candidate data is **synthetic** here (`generate_candidates`). Production loads a
+pre-scanned `.parquet`/`.csv` via `--data` / `CHANNEL_DATA`, held in memory and
+refreshed on scan. Feature model (`cleanliness`, `capture_prob`, `power_required`)
+is placeholder — wire real RSSI / capture-probability / regulatory band tables.
