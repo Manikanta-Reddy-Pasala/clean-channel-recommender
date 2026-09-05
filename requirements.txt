@@ -1,0 +1,4 @@
+ortools>=9.15
+polars>=1.44
+numpy>=2.0
+pyyaml>=6.0

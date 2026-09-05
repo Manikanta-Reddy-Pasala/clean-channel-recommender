@@ -1,0 +1,96 @@
+# ============================================================================
+# Channel recommendation config.
+# ALL logic lives here, not in code. Add a scenario = edit this file, ship nothing.
+# ============================================================================
+
+# Physical layer: technologies and their bands. Reference data.
+techs:
+  2G:
+    channel_bw_khz: 200
+    bands:
+      GSM900:  { f_low_khz:  935000, f_high_khz:  960000 }
+      GSM1800: { f_low_khz: 1805000, f_high_khz: 1880000 }
+  3G:
+    channel_bw_khz: 5000
+    bands:
+      B1: { f_low_khz: 2110000, f_high_khz: 2170000 }
+      B8: { f_low_khz:  925000, f_high_khz:  960000 }
+  4G:
+    channel_bw_khz: 10000
+    bands:
+      B1:  { f_low_khz: 2110000, f_high_khz: 2170000 }
+      B3:  { f_low_khz: 1805000, f_high_khz: 1880000 }
+      B40: { f_low_khz: 2300000, f_high_khz: 2400000 }
+  5G:
+    channel_bw_khz: 20000
+    bands:
+      n78: { f_low_khz: 3300000, f_high_khz: 3800000 }
+      n1:  { f_low_khz: 2110000, f_high_khz: 2170000 }
+
+# ----------------------------------------------------------------------------
+# Scenarios. The engine reads one of these per request and builds the filter +
+# objective + combinatorial constraints from it. No branching in code.
+#
+# Fields:
+#   allowed_techs / allowed_bands : hard whitelist (filter)
+#   hard_filters                  : per-candidate reject thresholds (filter)
+#   weights                       : linear score = sum(weight_i * feature_i)
+#   select                        : mode
+#       mode: top_k   -> just rank, return best k. No solver.
+#       mode: set     -> pick a mutually-compatible SET via CP-SAT:
+#           max_channels      : hardware transceiver limit (pick at most this many)
+#           min_separation_khz: guard band; two picks closer than this conflict
+#           power_budget      : sum of power_required over picks must be <= this
+# ----------------------------------------------------------------------------
+scenarios:
+
+  # Single best clean channel to camp on. Pure ranking, no solver -> ~ms.
+  urban_best_single:
+    allowed_techs: [4G, 5G]
+    allowed_bands: [B1, B3, n78, n1]
+    hard_filters:
+      max_commercial_rssi: -55      # skip channels with strong commercial cell
+      min_capture_prob: 0.25
+    weights:
+      cleanliness: 0.55             # 1 - normalized interference/occupancy
+      capture_prob: 0.35            # likelihood a handset camps on us
+      power_cost: -0.10             # penalize high tx power needed
+    select:
+      mode: top_k
+      k: 5
+
+  # Multi-transceiver deployment: pick a non-interfering SET. Real CP-SAT.
+  urban_multi_capture:
+    allowed_techs: [3G, 4G, 5G]
+    allowed_bands: [B1, B3, B40, n78, n1]
+    hard_filters:
+      max_commercial_rssi: -50
+      min_capture_prob: 0.20
+    weights:
+      cleanliness: 0.50
+      capture_prob: 0.40
+      power_cost: -0.10
+    select:
+      mode: set
+      max_channels: 4
+      min_separation_khz: 15000
+      power_budget: 220
+      prune_to: 400                 # feed only top-N to the solver
+
+  # Rural: 2G reaches further, wider net, tighter power.
+  rural_wide_capture:
+    allowed_techs: [2G, 4G]
+    allowed_bands: [GSM900, GSM1800, B1, B40]
+    hard_filters:
+      max_commercial_rssi: -60
+      min_capture_prob: 0.15
+    weights:
+      cleanliness: 0.35
+      capture_prob: 0.55
+      power_cost: -0.10
+    select:
+      mode: set
+      max_channels: 3
+      min_separation_khz: 10000
+      power_budget: 150
+      prune_to: 400
