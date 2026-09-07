@@ -131,14 +131,15 @@ def filter_and_score(df: pl.DataFrame, scn: dict) -> pl.DataFrame:
 #   - sum(power_required) over picks <= power_budget
 # Objective: maximize total score.
 # --------------------------------------------------------------------------- #
-def select_set(ranked: pl.DataFrame, sel: dict) -> pl.DataFrame:
+def select_set(ranked: pl.DataFrame, sel: dict) -> tuple[pl.DataFrame, str]:
     prune_to = sel.get("prune_to", 400)
     cand = ranked.head(prune_to)
     n = cand.height
     if n == 0:
-        return cand
+        return cand, "EMPTY"
 
     freq = cand["freq_khz"].to_numpy()
+    bw = cand["bw_khz"].to_numpy()
     power = cand["power_required"].to_numpy()
     # scale float score to int; CP-SAT is integer.
     score_i = (cand["score"].to_numpy() * 1_000_000).astype(np.int64)
@@ -150,26 +151,43 @@ def select_set(ranked: pl.DataFrame, sel: dict) -> pl.DataFrame:
     m.Add(sum(int(power[i]) * x[i] for i in range(n)) <= sel["power_budget"])
 
     # Interference: pairwise guard band on the pruned set only (n^2 but n<=few hundred).
+    #
+    # min_separation_khz is the gap required between channel EDGES, so two
+    # channels conflict when their centers are closer than
+    #     sep + (bw_i + bw_j) / 2
+    # Comparing centers against sep alone lets two 20 MHz channels 15 MHz apart
+    # through, and those overlap.
     sep = sel["min_separation_khz"]
     order = np.argsort(freq)
     fs = freq[order]
+    bws = bw[order]
+    # Widest pair requirement, so the sorted scan can stop early and stay correct.
+    break_at = sep + int(bw.max())
     for a in range(n):
         i = order[a]
         for b in range(a + 1, n):
-            if fs[b] - fs[a] >= sep:
-                break  # sorted: no further j conflicts with i
-            j = order[b]
-            m.Add(x[i] + x[j] <= 1)
+            gap = fs[b] - fs[a]
+            if gap >= break_at:
+                break  # sorted: no further j can conflict with i
+            if gap * 2 < sep * 2 + int(bws[a]) + int(bws[b]):
+                m.Add(x[i] + x[order[b]] <= 1)
 
     m.Maximize(sum(int(score_i[i]) * x[i] for i in range(n)))
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 1.0
     solver.parameters.num_search_workers = 8
-    solver.Solve(m)
+    status = solver.Solve(m)
+
+    # Reading solver values is only defined for OPTIMAL/FEASIBLE. The empty
+    # selection is always feasible, so INFEASIBLE cannot happen here, but a
+    # timeout can still return UNKNOWN -- report it instead of inventing a set.
+    name = solver.StatusName(status)
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return cand.head(0), name
 
     chosen = [i for i in range(n) if solver.Value(x[i]) == 1]
-    return cand[chosen].sort("score", descending=True)
+    return cand[chosen].sort("score", descending=True), name
 
 
 # --------------------------------------------------------------------------- #
@@ -185,8 +203,9 @@ def recommend(df: pl.DataFrame, cfg: dict, scenario: str) -> dict:
         result = ranked.head(sel.get("k", 5))
         t2 = time.perf_counter()
         solve_ms = 0.0
+        solver_status = None
     else:
-        result = select_set(ranked, sel)
+        result, solver_status = select_set(ranked, sel)
         t2 = time.perf_counter()
         solve_ms = (t2 - t1) * 1000
 
@@ -195,6 +214,7 @@ def recommend(df: pl.DataFrame, cfg: dict, scenario: str) -> dict:
         "mode": sel["mode"],
         "candidates_after_filter": ranked.height,
         "returned": result.height,
+        "solver_status": solver_status,
         "filter_score_ms": (t1 - t0) * 1000,
         "solve_ms": solve_ms,
         "total_ms": (t2 - t0) * 1000,
@@ -269,7 +289,8 @@ def main():
         print(f"  after filter : {r['candidates_after_filter']:,} candidates")
         print(f"  filter+score : {r['filter_score_ms']:.1f} ms")
         if r["mode"] == "set":
-            print(f"  CP-SAT solve : {r['solve_ms']:.1f} ms")
+            print(f"  CP-SAT solve : {r['solve_ms']:.1f} ms  "
+                  f"[{r['solver_status']}]")
         print(f"  TOTAL        : {r['total_ms']:.1f} ms  "
               f"({'OK <1s' if r['total_ms'] < 1000 else 'OVER 1s'})")
         print(f"  recommended {r['returned']} channel(s):")

@@ -160,17 +160,40 @@ candidates are sorted by frequency, so the inner loop can stop the moment it
 clears the guard band:
 
 ```python
-order = np.argsort(freq); fs = freq[order]
+order = np.argsort(freq); fs = freq[order]; bws = bw[order]
+break_at = sep + int(bw.max())          # widest requirement any pair can have
 for a in range(n):
     i = order[a]
     for b in range(a + 1, n):
-        if fs[b] - fs[a] >= sep:
+        gap = fs[b] - fs[a]
+        if gap >= break_at:
             break                       # sorted: nothing further conflicts either
-        m.Add(x[i] + x[order[b]] <= 1)
+        if gap * 2 < sep * 2 + int(bws[a]) + int(bws[b]):
+            m.Add(x[i] + x[order[b]] <= 1)
 ```
 
 Only genuinely conflicting pairs become constraints — typically a small
 fraction of the worst case.
+
+`min_separation_khz` is the gap required between channel **edges**, not
+centers, so two channels conflict when their centers are closer than
+`sep + (bw_i + bw_j)/2`. That per-pair requirement is why the scan breaks at
+`sep + max_bw` — the widest any pair can ask for — and then tests each pair
+exactly. (Written doubled, `gap*2 < sep*2 + bw_i + bw_j`, to stay in integers.)
+
+Then the solver's answer is only read if it actually solved:
+
+```python
+status = solver.Solve(m)
+name = solver.StatusName(status)
+if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    return cand.head(0), name
+```
+
+The empty selection is always feasible, so `INFEASIBLE` cannot occur — but the
+one-second cap can return `UNKNOWN` on a hard instance, and reading variable
+values from that is undefined. The status travels out through `recommend` as
+`solver_status`, and shows up in the CLI, the JSON, and the API response.
 
 The objective maximizes total score. CP-SAT is an integer solver, so float
 scores are scaled by 1,000,000 and cast to `int64`; six decimal places is far
@@ -231,9 +254,11 @@ At 1M rows, `urban_multi_capture`:
 
 | Stage | Time |
 |-------|------|
-| filter + score (1M rows) | ~44 ms |
-| CP-SAT (400 rows) | ~98 ms |
-| **total** | **~142 ms** |
+| filter + score (1M rows) | ~45 ms |
+| CP-SAT (400 rows) | ~173 ms |
+| **total** | **~218 ms** |
+
+At 5M rows the same scenario totals ~447 ms. Both measured on an 8-core box.
 
 Synthetic data generation (~1 s at 1M rows) is a one-time startup cost and is
 excluded — production loads a file instead.
@@ -263,13 +288,6 @@ checks.
 
 Honest list of what this POC does not do:
 
-- **Guard band ignores bandwidth.** `min_separation_khz` compares center
-  frequencies only. Two 20 MHz 5G channels 15 MHz apart overlap in reality but
-  pass this check. Real separation should be `sep + (bw_i + bw_j)/2`.
-- **Solver status is not checked.** `solver.Solve(m)` runs, then values are read
-  without inspecting the status. The model always admits the empty selection so
-  it cannot be infeasible, but a one-second timeout on a hard instance could
-  return `UNKNOWN`, and reading values from that is unsafe.
 - **The full filtered set is sorted** — ~500k rows — when only the top few
   hundred are needed. `top_k` would be cheaper than `sort`.
 - **`noise_floor` and `bw_khz` are carried but never used.** They exist for the
@@ -279,3 +297,7 @@ Honest list of what this POC does not do:
 - **The feature model is invented.** `cleanliness`, `capture_prob` and
   `power_required` are plausible-looking random draws, not measurements, and
   nothing here has been validated against a real scan.
+
+Two earlier entries are now fixed rather than known: the guard band accounts
+for channel bandwidth, and the solver's status is checked before its answer is
+trusted.

@@ -24,9 +24,9 @@ Full code walkthrough, file by file: **[WALKTHROUGH.md](WALKTHROUGH.md)**.
 
 | Rows | Scenario | Total |
 |------|----------|-------|
-| 1M | best single | 26 ms |
-| 1M | multi-channel set | 135 ms |
-| 5M | multi-channel set | 350 ms |
+| 1M | best single | 34 ms |
+| 1M | multi-channel set | 218 ms |
+| 5M | multi-channel set | 447 ms |
 
 ## Run
 
