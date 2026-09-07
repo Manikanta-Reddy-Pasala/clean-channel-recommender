@@ -18,6 +18,8 @@ zero per-scenario code.
 
 Prune millions first, solve on hundreds. That is why it stays under 1s.
 
+Full code walkthrough, file by file: **[WALKTHROUGH.md](WALKTHROUGH.md)**.
+
 ## Benchmarks (8-core)
 
 | Rows | Scenario | Total |
@@ -61,7 +63,7 @@ urban_multi_capture:
 
 ## Files
 
-`engine.py` (filter+score+CP-SAT+CLI) · `api.py` (FastAPI + UI) · `static/index.html` (web UI) · `config.yaml` (all logic) · `Makefile` · `requirements.txt`
+`engine.py` (filter+score+CP-SAT+CLI) · `api.py` (FastAPI + UI) · `static/index.html` (web UI) · `config.yaml` (all logic) · `Makefile` · `requirements.txt` · [`WALKTHROUGH.md`](WALKTHROUGH.md) (how it works)
 
 ## Note
 
